@@ -274,8 +274,8 @@ const CONFIG = {
   // Shion referral link for the CTA button
   REFERRAL_URL: '#',
 
-  // CORS proxy (matches existing vector-dashboard pattern)
-  CORS_PROXY: 'https://corsproxy.io/?',
+  // Fallback CORS proxy used only if direct fetch fails
+  FALLBACK_PROXY: 'https://api.allorigins.win/raw?url=',
 
   // Auto-refresh every 5 minutes
   REFRESH_INTERVAL_MS: 5 * 60 * 1000
@@ -331,10 +331,20 @@ async function fetchSignals() {
   if (!CONFIG.CSV_URL || CONFIG.CSV_URL === 'PASTE_PUBLISHED_CSV_URL_HERE') {
     throw new Error('CSV_URL not configured. Edit index.html and set CONFIG.CSV_URL.');
   }
-  const url = CONFIG.CORS_PROXY + encodeURIComponent(CONFIG.CSV_URL + '&_=' + Date.now());
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
-  const text = await res.text();
+  const bust = '&_=' + Date.now();
+  let text;
+  // Try direct first (Google published CSVs support CORS natively)
+  try {
+    const res = await fetch(CONFIG.CSV_URL + bust);
+    if (!res.ok) throw new Error('direct fetch status ' + res.status);
+    text = await res.text();
+  } catch (directErr) {
+    // Fallback to allorigins proxy
+    const proxied = CONFIG.FALLBACK_PROXY + encodeURIComponent(CONFIG.CSV_URL + bust);
+    const res = await fetch(proxied);
+    if (!res.ok) throw new Error(`Both direct and proxied fetches failed. Last status: ${res.status}`);
+    text = await res.text();
+  }
   const parsed = Papa.parse(text, { header: true, skipEmptyLines: true });
   // Strip leading apostrophes (Sheets text-marker) from string fields
   const clean = v => {
