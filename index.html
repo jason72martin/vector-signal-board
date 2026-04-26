@@ -205,6 +205,10 @@
   .history-empty .empty-icon { font-size: 40px; margin-bottom: 16px; opacity: 0.6; }
   .history-empty .empty-title { font-family: 'Orbitron', sans-serif; font-weight: 600; font-size: 16px; color: var(--text-primary); letter-spacing: 0.04em; margin-bottom: 8px; }
   .history-empty .empty-body { font-size: 13.5px; color: var(--text-tertiary); max-width: 480px; margin: 0 auto; line-height: 1.6; }
+  .history-divider { padding: 24px 16px 16px; text-align: center; }
+  .divider-line { height: 1px; background: linear-gradient(90deg, transparent, var(--border-strong), transparent); margin-bottom: 12px; }
+  .divider-caption { font-family: 'Orbitron', sans-serif; font-size: 11px; color: var(--text-tertiary); letter-spacing: 0.12em; text-transform: uppercase; font-weight: 500; }
+  .history-footnote { padding: 18px 24px 14px; font-size: 12px; color: var(--text-tertiary); font-style: italic; line-height: 1.55; border-top: 1px solid var(--border); margin-top: 8px; text-align: center; }
   .method-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; margin-bottom: 32px; }
   .method-body { padding: 32px; font-size: 14.5px; color: var(--text-secondary); line-height: 1.65; }
   .method-body h3 { font-family: 'Orbitron', sans-serif; font-weight: 700; font-size: 18px; color: var(--text-primary); letter-spacing: 0.04em; margin-bottom: 18px; }
@@ -278,7 +282,11 @@ const CONFIG = {
   FALLBACK_PROXY: 'https://api.allorigins.win/raw?url=',
 
   // Auto-refresh every 5 minutes
-  REFRESH_INTERVAL_MS: 5 * 60 * 1000
+  REFRESH_INTERVAL_MS: 5 * 60 * 1000,
+
+  // First live trading week start date. Anything before this is backfill.
+  // Changing this changes where the divider appears in Signal History.
+  LIVE_START_DATE: '2026-04-20'
 };
 
 // =========================================================================
@@ -306,6 +314,20 @@ function formatDate(d, fmt) {
   if (fmt === 'chip') return `${m.toUpperCase()} ${day}`;
   if (fmt === 'header') return `${dow.toUpperCase()} · ${day} ${m.toUpperCase()} ${d.getUTCFullYear()}`;
   return `${m} ${day}`;
+}
+// Format a Mon-Fri week range with year. Same year: "Apr 13 – Apr 17, 2026".
+// Year-boundary week: "Dec 30, 2024 – Jan 3, 2025".
+function formatWeekRange(startDate, endDate) {
+  const sm = MONTHS[startDate.getUTCMonth()];
+  const sd = startDate.getUTCDate();
+  const sy = startDate.getUTCFullYear();
+  const em = MONTHS[endDate.getUTCMonth()];
+  const ed = endDate.getUTCDate();
+  const ey = endDate.getUTCFullYear();
+  if (sy !== ey) {
+    return `${sm} ${sd}, ${sy} – ${em} ${ed}, ${ey}`;
+  }
+  return `${sm} ${sd} – ${em} ${ed}, ${ey}`;
 }
 function mondayOf(d) {
   const date = new Date(d);
@@ -382,11 +404,11 @@ function deriveViewModel(rows) {
   const today = new Date();
   today.setUTCHours(0, 0, 0, 0);
   const todayKey = dateKey(today);
-  const thisMonday = mondayOf(today);
-  const thisMondayKey = dateKey(thisMonday);
+  let thisMonday = mondayOf(today);
+  let thisMondayKey = dateKey(thisMonday);
 
-  // Current week rows (Mon - Fri of this week)
-  const currentWeek = [];
+  // Build current week (Mon-Fri of this week)
+  let currentWeek = [];
   for (let i = 0; i < 5; i++) {
     const d = new Date(thisMonday);
     d.setUTCDate(d.getUTCDate() + i);
@@ -395,10 +417,7 @@ function deriveViewModel(rows) {
     currentWeek.push({ date: d, key, row: row || null });
   }
 
-  // Today's row
-  const todayRow = rows.find(r => r.date === todayKey) || null;
-
-  // Past weeks (completed, week_start before this Monday)
+  // Past weeks: anything with week_start before this Monday
   const pastWeeks = {};
   rows.forEach(r => {
     if (!r.week_start) return;
@@ -406,6 +425,39 @@ function deriveViewModel(rows) {
     if (!pastWeeks[r.week_start]) pastWeeks[r.week_start] = [];
     pastWeeks[r.week_start].push(r);
   });
+
+  // AUTO-ROLLOVER: if Friday of current week has a completed result,
+  // move the whole week into history and advance current week to next Monday-Friday.
+  // This produces the "clean slate" weekend display Jason wants.
+  const fridayRow = currentWeek[4].row;
+  const fridayCompleted = fridayRow && fridayRow.status === 'completed';
+  if (fridayCompleted) {
+    // Push current week's posted rows into history
+    const completedRows = currentWeek.filter(d => d.row).map(d => d.row);
+    if (completedRows.length > 0) {
+      pastWeeks[thisMondayKey] = (pastWeeks[thisMondayKey] || []).concat(completedRows);
+    }
+    // Advance to following week
+    const nextMonday = new Date(thisMonday);
+    nextMonday.setUTCDate(nextMonday.getUTCDate() + 7);
+    thisMonday = nextMonday;
+    thisMondayKey = dateKey(thisMonday);
+    currentWeek = [];
+    for (let i = 0; i < 5; i++) {
+      const d = new Date(thisMonday);
+      d.setUTCDate(d.getUTCDate() + i);
+      const key = dateKey(d);
+      const row = rows.find(r => r.date === key);
+      currentWeek.push({ date: d, key, row: row || null });
+    }
+  }
+
+  // Today's row (recompute against rows after rollover so we don't show
+  // a just-rolled-over Friday in the hero card on Saturday)
+  const todayRow = (today >= thisMonday)
+    ? (rows.find(r => r.date === todayKey) || null)
+    : null;
+
   const weekKeys = Object.keys(pastWeeks).sort().reverse();
 
   // KPIs computed from all rows starting at first available week
@@ -623,7 +675,6 @@ function renderWeekInProgress(vm) {
   let rowsHtml = '';
   let weekTotal = 0;
   let w = 0, l = 0, nf = 0;
-  let anyPosted = false;
 
   vm.currentWeek.forEach(({ date, row }) => {
     const dayName = DAYS_FULL[date.getUTCDay()];
@@ -641,7 +692,6 @@ function renderWeekInProgress(vm) {
       `;
       return;
     }
-    anyPosted = true;
 
     const light = row.light && ['green','yellow','red'].includes(row.light) ? row.light : 'pending';
     const lightLabel = row.light && ['green','yellow','red'].includes(row.light) ? row.light.charAt(0).toUpperCase() + row.light.slice(1) : 'Pending';
@@ -733,13 +783,32 @@ function renderHistory(vm) {
     `;
   }
 
+  // Build the live-start divider HTML once (parsed dynamically below).
+  // The divider is inserted between the last live row and the first backfill row,
+  // following the newest-first ordering of weekKeys.
+  let dividerInserted = false;
+  const liveStart = CONFIG.LIVE_START_DATE;
+  const liveStartDate = parseDate(liveStart);
+  const dividerCaption = `↑ Live trading begins ${formatDate(liveStartDate, 'short')}, ${liveStartDate.getUTCFullYear()}`;
+
   const weeksHtml = vm.weekKeys.map(wk => {
+    let prefix = '';
+    if (wk < liveStart && !dividerInserted) {
+      dividerInserted = true;
+      prefix = `
+        <div class="history-divider">
+          <div class="divider-line"></div>
+          <div class="divider-caption">${esc(dividerCaption)}</div>
+        </div>
+      `;
+    }
+
     const rows = vm.pastWeeks[wk];
     const weekStart = parseDate(wk);
     const weekEnd = new Date(weekStart);
     weekEnd.setUTCDate(weekEnd.getUTCDate() + 4);
     const weekNum = rows[0].week_num ? String(rows[0].week_num).padStart(2, '0') : '';
-    const rangeStr = `${formatDate(weekStart, 'short')} – ${formatDate(weekEnd, 'short')}`;
+    const rangeStr = formatWeekRange(weekStart, weekEnd);
 
     let weekTotal = 0, w = 0, l = 0, nf = 0;
     const dayHtml = [];
@@ -767,7 +836,7 @@ function renderHistory(vm) {
     }
 
     const totalClass = weekTotal >= 0 ? '' : 'neg';
-    return `
+    return prefix + `
       <div class="history-week">
         <div class="week-label-block">
           <div class="wk">Week ${weekNum}</div>
@@ -782,13 +851,19 @@ function renderHistory(vm) {
     `;
   }).join('');
 
+  const footnoteHtml = `
+    <div class="history-footnote">
+      Backfill rows reflect the algorithm's picks using only the 9-week lookback data available at each historical date. Live rows reflect actual trades placed.
+    </div>
+  `;
+
   return `
     <div class="section">
       <div class="section-head">
         <h2><span class="icon">📜</span>Signal History</h2>
         <div class="meta">Completed weeks · Newest first</div>
       </div>
-      <div class="card history-card">${weeksHtml}</div>
+      <div class="card history-card">${weeksHtml}${footnoteHtml}</div>
     </div>
   `;
 }
@@ -798,10 +873,9 @@ function renderMethodology() {
     <div class="method-grid">
       <div class="card method-body">
         <h3>🧠 How it works</h3>
-        <p>Every weekday, a single strategy is selected for live execution on NQ futures. Picks are posted publicly on <strong>Sunday evening</strong> for the week ahead and do not change mid-cycle. No hindsight. No cherry-picking.</p>
-        <p>Strategy selection uses a <strong>nine-week backward lookback</strong> with streak-aware scoring and variable commitment cycles. Monday through Wednesday run on 3-week cycles, Thursday and Friday run on 2-week cycles. All strategies are fully automated, hands-off algorithmic systems provided by Vector Algorithmics.</p>
-        <p>Each morning before the open, a <strong>traffic light signal</strong> is published based on VIX, energy markets, and overnight geopolitical developments. Green clears the strategy to run at full size. Yellow or Red reduce size or stand down.</p>
-        <p>Results shown reflect what a <strong>single NQ contract</strong> would have earned on each day's pick. No account balances, no personal positions, just the signal and the outcome.</p>
+        <p>Every weekday, a single algorithmic strategy is selected for live execution on NQ futures.</p>
+        <p>The pick publishes before <strong>8:45 AM ET</strong> and is final once posted.</p>
+        <p>Each morning a traffic light signal indicates whether conditions clear the strategy to run.</p>
       </div>
       <div class="card method-aside">
         <h3>At a Glance</h3>
@@ -840,7 +914,7 @@ function renderFooter() {
   return `
     <footer>
       <div class="col"><h4>Vector Signal Board</h4>An editorial log of automated NQ futures signals, updated each trading day. Independent record. Not investment advice.</div>
-      <div class="col"><h4>Data Integrity</h4>Picks are locked by 6 PM ET on the Sunday prior. Daily signals publish by 8:45 AM ET. Results are recorded from broker execution logs within two hours of settlement.</div>
+      <div class="col"><h4>Data Integrity</h4>Each pick publishes before 8:45 AM ET and is final once posted. Results are recorded from broker execution logs within two hours of settlement.</div>
       <div class="col"><h4>Disclosure</h4>Per-contract results are reported net of estimated commissions. Futures trading involves substantial risk of loss. Past performance does not guarantee future results.</div>
     </footer>
   `;
